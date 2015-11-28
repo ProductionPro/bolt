@@ -156,18 +156,20 @@ util.methods(RulesSuite, {
     return this.ensureUser(username).uid;
   },
 
-  ensureUser: function(username) {
-    if (!(username in this.users)) {
+  ensureUser: function(username, data) {
+    // if (!(username in this.users)) {
       if (username === 'anon') {
         this.users[username] = new rest.Client(this.appName);
       } else {
         var tokenInfo;
-        tokenInfo = rest.generateUidAuthToken(this.appSecret,
+        data = util.extend({uid: username}, data);
+        tokenInfo = rest.generateAuthToken(this.appSecret,
+                                              data,
                                               { debug: true,
                                                 admin: username === 'admin' });
         this.users[username] = new rest.Client(this.appName, tokenInfo.token, tokenInfo.uid);
       }
-    }
+    // }
 
     return this.users[username];
   }
@@ -253,8 +255,8 @@ util.methods(RulesTest, {
     return this;
   },
 
-  as: function(username) {
-    var client = this.suite.ensureUser(username);
+  as: function(username, data) {
+    var client = this.suite.ensureUser(username, data);
     this.queue('as', arguments, () => {
       this.client = client;
     });
@@ -336,11 +338,11 @@ util.methods(RulesTest, {
   },
 
   good: function(message) {
-    this.log(message + " (Correct)");
+    this.log(message + " (Correct)", true);
   },
 
-  log: function(message) {
-    if (this.suite.debug) {
+  log: function(message, force) {
+    if (this.suite.debug || force) {
       console.log(this.messageFormat(message));
     }
   },
