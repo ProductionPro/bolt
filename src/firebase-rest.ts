@@ -150,6 +150,14 @@ export function generateUidAuthToken(secret, opts) {
   return { uid: uid, token: token };
 }
 
+export function generateAuthToken(secret, data, opts) {
+  opts = util.extend({ debug: false, admin: false }, opts);
+
+  var tokenGenerator = new FirebaseTokenGenerator(secret);
+  var token = tokenGenerator.createToken(data, opts);
+  return { uid: data.uid, token: token };
+}
+
 /**
  * Fancy ID generator that creates 20-character string identifiers with the following properties:
  *
