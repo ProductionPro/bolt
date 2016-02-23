@@ -16,6 +16,9 @@
 /// <reference path="typings/node.d.ts" />
 import util = require('./util');
 import ast = require('./ast');
+import logger = require('./logger');
+import parseUtil = require('./parse-util');
+let parseExpression = parseUtil.parseExpression;
 
 var errors = {
   badIndex: "The index function must return a String or an array of Strings.",
@@ -28,6 +31,7 @@ var errors = {
   noSuchType: "No type definition for: ",
   badSchemaMethod: "Unsupported method name in type statement: ",
   badPathMethod: "Unsupported method name in path statement: ",
+  badWriteAlias: "Cannot have both a write() method and a write-aliasing method: ",
   coercion: "Cannot convert value: ",
   undefinedFunction: "Undefined function: ",
   application: "Bolt application error: ",
@@ -58,6 +62,7 @@ let INVALID_KEY_REGEX = /[\[\].#$\/\u0000-\u001F\u007F]/;
    '.write': ast.Exp[] | string;
    '.validate': ast.Exp[] | string;
    '.indexOn': string[];
+   '$$scope': { [variable: string]: string }
 */
 export type ValidatorValue = ast.Exp | ast.Exp[] | string | string[] | Validator;
 export interface Validator {
@@ -73,25 +78,29 @@ var valueMethods = ['length', 'includes', 'startsWith', 'beginsWith', 'endsWith'
 var snapshotMethods = ['parent', 'child', 'hasChildren', 'val', 'isString', 'isNumber',
                        'isBoolean'].concat(valueMethods);
 
+var writeAliases = <{ [method: string]: ast.Exp }> {
+  'create': parseExpression('prior(this) == null'),
+  'update': parseExpression('prior(this) != null && this != null'),
+  'delete': parseExpression('prior(this) != null && this == null')
+};
+
 // Symbols contains:
 //   functions: {}
 //   schema: {}
 //   paths: {}
 export class Generator {
   symbols: ast.Symbols;
-  log: ast.Loggers;
   validators: { [schemaName: string]: Validator; };
   rules: Validator;
   errorCount: number;
   runSilently: boolean;
   allowUndefinedFunctions: boolean;
-  globals: { [name: string]: ast.Exp };
+  globals: ast.Params;
   thisIs: string;
   keyIndex: number;
 
   constructor(symbols: ast.Symbols) {
     this.symbols = symbols;
-    this.log = symbols.log;
     this.validators = {};
     this.rules = {};
     this.errorCount = 0;
@@ -114,14 +123,10 @@ export class Generator {
     var schema = this.symbols.schema;
     var name;
 
-    for (name in paths) {
-      if (!paths.hasOwnProperty(name)) {
-        continue;
-      }
-
-      this.validateMethods(errors.badPathMethod, paths[name].methods,
+    paths.forEach((path) => {
+      this.validateMethods(errors.badPathMethod, path.methods,
                            ['validate', 'read', 'write', 'index']);
-    }
+    });
 
     for (name in schema) {
       if (!util.arrayIncludes(builtinSchemaNames, name)) {
@@ -130,23 +135,18 @@ export class Generator {
       }
     }
 
-    if (Object.keys(paths).length === 0) {
+    if (paths.length === 0) {
       this.fatal(errors.noPaths);
     }
 
-    for (var pathName in paths) {
-      if (!paths.hasOwnProperty(pathName)) {
-        continue;
-      }
-
-      this.updateRules(paths[pathName]);
-    }
+    paths.forEach((path) => this.updateRules(path));
     this.convertExpressions(this.rules);
 
     if (this.errorCount !== 0) {
       throw new Error(errors.generateFailed + this.errorCount + " errors.");
     }
 
+    util.deletePropName(this.rules, '$$scope');
     util.pruneEmptyChildren(this.rules);
 
     return {
@@ -155,11 +155,21 @@ export class Generator {
   }
 
   validateMethods(m: string, methods: { [name: string]: ast.Method }, allowed: string[]) {
+    if (util.arrayIncludes(allowed, 'write')) {
+      allowed = allowed.concat(Object.keys(writeAliases));
+    }
     for (var method in methods) {
       if (!util.arrayIncludes(allowed, method)) {
-        this.log.warn(m + util.quoteString(method) +
-                      " (allowed: " + allowed.map(util.quoteString).join(', ') + ")");
+        logger.warn(m + util.quoteString(method) +
+                    " (allowed: " + allowed.map(util.quoteString).join(', ') + ")");
       }
+    }
+    if ('write' in methods) {
+      Object.keys(writeAliases).forEach((alias) => {
+        if (alias in methods) {
+          this.fatal(errors.badWriteAlias + alias);
+        }
+      });
     }
   }
 
@@ -308,7 +318,7 @@ export class Generator {
       return schema.getValidator(params);
     }
 
-    let bindings = <{[name: string]: ast.ExpType}> {};
+    let bindings = <ast.TypeParams> {};
     for (let i = 0; i < params.length; i++) {
       bindings[schema.params[i]] = params[i];
     }
@@ -318,7 +328,7 @@ export class Generator {
     return this.createValidatorFromSchema(schema);
   }
 
-  replaceGenericsInSchema(schema: ast.Schema, bindings: {[name: string]: ast.ExpType}): ast.Schema {
+  replaceGenericsInSchema(schema: ast.Schema, bindings: ast.TypeParams): ast.Schema {
     var expandedSchema = <ast.Schema> {
       derivedFrom: <ast.ExpType> this.replaceGenericsInExp(schema.derivedFrom, bindings),
       properties: { },
@@ -338,7 +348,7 @@ export class Generator {
     return expandedSchema;
   }
 
-  replaceGenericsInExp(exp: ast.Exp, bindings: {[name: string]: ast.ExpType}): ast.Exp {
+  replaceGenericsInExp(exp: ast.Exp, bindings: ast.TypeParams): ast.Exp {
     var self = this;
 
     function replaceGenericsInArray(exps: ast.Exp[]): ast.Exp[] {
@@ -372,7 +382,7 @@ export class Generator {
     }
   }
 
-  replaceGenericsInMethod(method: ast.Method, bindings: {[name: string]: ast.ExpType}): ast.Method {
+  replaceGenericsInMethod(method: ast.Method, bindings: ast.TypeParams): ast.Method {
     var expandedMethod = <ast.Method> {
       params: method.params,
       body: method.body
@@ -456,13 +466,7 @@ export class Generator {
                       <Validator> {'.validate': ast.boolean(false)});
     }
 
-    ['validate', 'read', 'write'].forEach(function(method) {
-      if (schema.methods[method]) {
-        var methodValidator = <Validator> {};
-        methodValidator['.' + method] = [schema.methods[method].body];
-        extendValidator(validator, methodValidator);
-      }
-    });
+    this.extendValidationMethods(validator, schema.methods);
 
     return validator;
   }
@@ -475,18 +479,13 @@ export class Generator {
   // Update rules based on the given path expression.
   updateRules(path: ast.Path) {
     var i;
-    var location = <Validator> util.ensureObjectPath(this.rules, path.parts);
+    var location = <Validator> util.ensureObjectPath(this.rules, path.template.getLabels());
     var exp;
 
     extendValidator(location, this.ensureValidator(path.isType));
+    location['$$scope'] = path.template.getScope();
 
-    ['validate', 'read', 'write'].forEach(function(method) {
-      if (path.methods[method]) {
-        var validator = <Validator> {};
-        validator['.' + method] = [path.methods[method].body];
-        extendValidator(location, validator);
-      }
-    });
+    this.extendValidationMethods(location, path.methods);
 
     // Write indices
     if (path.methods['index']) {
@@ -514,6 +513,26 @@ export class Generator {
     }
   }
 
+  extendValidationMethods(validator: Validator, methods: { [method: string]: ast.Method }) {
+    let writeMethods = [];
+    ['create', 'update', 'delete'].forEach((method) => {
+      if (method in methods) {
+        writeMethods.push(ast.andArray([writeAliases[method], methods[method].body]));
+      }
+    });
+    if (writeMethods.length !== 0) {
+      extendValidator(validator, <Validator> { '.write': ast.orArray(writeMethods) });
+    }
+
+    ['validate', 'read', 'write'].forEach((method) => {
+      if (method in methods) {
+        var methodValidator = <Validator> {};
+        methodValidator['.' + method] = methods[method].body;
+        extendValidator(validator, methodValidator);
+      }
+    });
+  }
+
   // Return union validator (||) over each schema
   unionValidators(schema: string[]): Validator {
     var union = <Validator> {};
@@ -533,10 +552,14 @@ export class Generator {
                          '.read': 'data',
                          '.write': 'newData' };
 
-    mapValidator(validator, function(value: ast.Exp[], prop: string, path: string[]) {
+    mapValidator(validator, function(value: ast.Exp[],
+                                     prop: string,
+                                     scope: ast.Params,
+                                     path: ast.PathTemplate) {
       if (prop in methodThisIs) {
         let result = this.getExpressionText(ast.andArray(collapseHasChildren(value)),
                                             methodThisIs[prop],
+                                            scope,
                                             path);
         if (prop === '.validate' && result === 'true' ||
             (prop === '.read' || prop === '.write') && result === 'false') {
@@ -548,17 +571,20 @@ export class Generator {
     }.bind(this));
   }
 
-  getExpressionText(exp: ast.Exp, thisIs: string, path: string[]): string {
+  getExpressionText(exp: ast.Exp, thisIs: string, scope: ast.Params, path: ast.PathTemplate): string {
     if (!('type' in exp)) {
       throw new Error(errors.application + "Not an expression: " + util.prettyJSON(exp));
     }
     // First evaluate w/o binding of this to specific location.
     this.allowUndefinedFunctions = true;
-    exp = this.partialEval(exp, { 'this': ast.cast(ast.call(ast.variable('@getThis')),
-                                                   'Snapshot') });
+    scope = <ast.Params> util.extend({},
+                                     scope,
+                                     { 'this': ast.cast(ast.call(ast.variable('@getThis')),
+                                                        'Snapshot') });
+    exp = this.partialEval(exp, scope);
     // Now re-evaluate the flattened expression.
     this.allowUndefinedFunctions = false;
-    this.thisIs = thisIs || 'newData';
+    this.thisIs = thisIs;
     this.symbols.registerFunction('@getThis', [],
                                   ast.builtin(this.getThis.bind(this)));
     this.symbols.registerFunction('@root', [],
@@ -566,7 +592,9 @@ export class Generator {
     this.symbols.registerFunction('prior', ['exp'],
                                   ast.builtin(this.prior.bind(this)));
     this.symbols.registerFunction('key', [],
-                                  ast.builtin(this.getKey.bind(this, path[path.length - 1])));
+                                  ast.builtin(this.getKey.bind(
+                                    this,
+                                    path.length() === 0 ? '' : path.getPart(-1).label)));
 
     exp = this.partialEval(exp);
 
@@ -586,7 +614,7 @@ export class Generator {
    */
 
   partialEval(exp: ast.Exp,
-              params: { [name: string]: ast.Exp } = {},
+              params = <ast.Params> {},
               functionCalls: { [name: string]: boolean } = {})
   : ast.Exp {
     // Wrap real call for debugging.
@@ -602,8 +630,8 @@ export class Generator {
   // - Expand snapshot references using child('ref').
   // - Coerce snapshot references to values as needed.
   partialEvalReal(exp: ast.Exp,
-              params: { [name: string]: ast.Exp } = {},
-              functionCalls: { [name: string]: boolean } = {})
+              params = <ast.Params> {},
+              functionCalls = <{ [name: string]: boolean }> {})
   : ast.Exp {
     var self = this;
 
@@ -710,7 +738,7 @@ export class Generator {
           return (<ast.ExpBuiltin> fn.body).fn(expCall.args, params);
         }
 
-        let innerParams: { [arg: string]: ast.Exp } = {};
+        let innerParams = <ast.Params> {};
 
         for (let i = 0; i < fn.params.length; i++) {
           innerParams[fn.params[i]] = subExpression(expCall.args[i]);
@@ -753,7 +781,7 @@ export class Generator {
 
   // Builtin function - convert all 'this' to 'data' (from 'newData').
   // Args are function arguments, and params are the local (function) scope variables.
-  prior(args: ast.Exp[], params: { [name: string]: ast.Exp }): ast.Exp {
+  prior(args: ast.Exp[], params: ast.Params): ast.Exp {
     var lastThisIs = this.thisIs;
     this.thisIs = 'data';
     var exp = this.partialEval(args[0], params);
@@ -762,12 +790,12 @@ export class Generator {
   }
 
   // Builtin function - current value of 'this'
-  getThis(args: ast.Exp[], params: { [name: string]: ast.Exp }): ast.Exp {
+  getThis(args: ast.Exp[], params: ast.Params): ast.Exp {
     return ast.snapshotVariable(this.thisIs);
   }
 
   // Builtin function - ensure type of argument
-  ensureType(type: string, args: ast.Exp[], params: { [name: string]: ast.Exp }) {
+  ensureType(type: string, args: ast.Exp[], params: ast.Params) {
     if (args.length !== 1) {
       throw new Error(errors.application + "ensureType arguments.");
     }
@@ -779,7 +807,7 @@ export class Generator {
   }
 
   // Builtin function - return the parent key of 'this'.
-  getKey(key: string, args: ast.Exp[], params: { [name: string]: ast.Exp }) {
+  getKey(key: string, args: ast.Exp[], params: ast.Params) {
     if (args.length !== 0) {
       throw new Error(errors.mismatchParams + "(found " + args.length + " but expected 1)");
     }
@@ -790,7 +818,7 @@ export class Generator {
   // Builtin function - return the reference to the root
   // When in read mode - use 'root'
   // When in write/validate - use path to root via newData.parent()...
-  getRootReference(path: string[], args: ast.Exp[], params: { [name: string]: ast.Exp }) {
+  getRootReference(path: ast.PathTemplate, args: ast.Exp[], params: ast.Params) {
     if (args.length !== 0) {
       throw new Error(errors.application + "@root arguments.");
     }
@@ -802,7 +830,7 @@ export class Generator {
 
     // 'newData' case - traverse to root via parent()'s.
     let result: ast.Exp = ast.snapshotVariable('newData');
-    for (let i = 0; i < path.length; i++) {
+    for (let i = 0; i < path.length(); i++) {
       result = ast.snapshotParent(result);
     }
     return result;
@@ -840,13 +868,8 @@ export class Generator {
     return undefined;
   }
 
-  setLoggers(loggers: ast.Loggers) {
-    this.symbols.setLoggers(loggers);
-    this.log = this.symbols.log;
-  }
-
   fatal(s: string) {
-    this.log.error(s);
+    logger.error(s);
     this.errorCount += 1;
   }
 };
@@ -880,27 +903,40 @@ export function extendValidator(target: Validator, src: Validator): Validator {
   return target;
 }
 
-// Call fn(value, prop) on all '.props' and assiging the value back into the
+// Call fn(value, prop, path) on all '.props' and assiging the value back into the
 // validator.
 export function mapValidator(v: Validator,
-                             fn: (val: ValidatorValue, prop: string, path: string[]) => ValidatorValue,
-                             path?: string[]) {
+                             fn: (val: ValidatorValue,
+                                  prop: string,
+                                  scope: ast.Params,
+                                  path: ast.PathTemplate) => ValidatorValue,
+                             scope?: ast.Params,
+                             path?: ast.PathTemplate) {
+  if (!scope) {
+    scope = <ast.Params> {};
+  }
   if (!path) {
-    path = [];
+    path = new ast.PathTemplate();
+  }
+  if ('$$scope' in v) {
+    scope = <ast.Params> v['$$scope'];
   }
   for (var prop in v) {
     if (!v.hasOwnProperty(prop)) {
       continue;
     }
     if (prop[0] === '.') {
-      v[prop] = fn(v[prop], prop, path);
+      v[prop] = fn(v[prop], prop, scope, path);
       if (v[prop] === undefined) {
         delete v[prop];
       }
+    } else if (!util.isType(v[prop], 'object')) {
+      continue;
     } else {
-      path.push(prop);
-      mapValidator(<Validator> v[prop], fn, path);
-      path.pop();
+      let child = new ast.PathTemplate([prop]);
+      path.push(child);
+      mapValidator(<Validator> v[prop], fn, scope, path);
+      path.pop(child);
     }
   }
 }

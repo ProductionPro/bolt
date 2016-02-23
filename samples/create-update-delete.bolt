@@ -1,0 +1,20 @@
+// Demonstrates how to create independent create, update, and delete write rules.
+
+path /docs/{uid} {
+    /create { create() { true } }
+    /update { update() { true } }
+    /delete { delete() { true } }
+
+    /create-or-update {
+      create() { true }
+      update() { true }
+    }
+
+    /owner-create-delete {
+      create() { isOwner(uid) }
+      delete() { isOwner(uid) }
+      update() { true }
+    }
+}
+
+isOwner(uid) { uid == auth.uid }

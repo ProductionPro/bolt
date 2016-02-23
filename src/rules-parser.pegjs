@@ -21,8 +21,16 @@
 
   var ast = require('./ast');
   var util = require('./util');
+  var logger = require('./logger');
+  var error = logger.error;
+  var warn = logger.warn;
 
-  var errorCount = 0;
+  logger.setContext(function() {
+    return {
+      line: line(),
+      column: column()
+    };
+  });
 
   // Return a left-associative binary structure
   // consisting of head (exp), and tail (op, exp)*.
@@ -35,26 +43,8 @@
   }
 
   var symbols = new ast.Symbols();
-  symbols.setLoggers({
-    error: error,
-    warn: warn
-  });
 
-  var rootPath = [];
-
-  function pushPath(path) {
-    util.extendArray(rootPath, path);
-  }
-
-  function popPath(path) {
-    path.forEach(function(part) {
-      rootPath.pop();
-    });
-  }
-
-  function currentPath() {
-    return util.copyArray(rootPath);
-  }
+  var currentPath = new ast.PathTemplate();
 
   function ensureLowerCase(s, m) {
     if (s instanceof Array) {
@@ -83,30 +73,11 @@
     }
     return s;
   }
-
-  var lastError = undefined;
-
-  function error(s) {
-    errorCount += 1;
-    lastError = errorString({line: line(), column: column()}, s);
-    console.error(lastError);
-  }
-
-  function warn(s) {
-    console.warn(errorString({line: line(), column: column()}, s));
-  }
-
-  function errorString(loc, s) {
-    return 'bolt:' + loc.line + ':' + loc.column + ': ' + s;
-  }
 }
 
 start = _ Statements _ {
-  if (errorCount === 1) {
-    throw(new Error(lastError));
-  }
-  if (errorCount != 0) {
-    throw(new Error("Fatal errors: " + errorCount));
+  if (logger.hasErrors()) {
+    throw(new Error(logger.errorSummary()));
   }
   return symbols;
 }
@@ -115,19 +86,56 @@ Statements = rules:(Statement _)*
 
 Statement = f:Function / p:Path / s:Schema
 
-Function "function definition" = ("function" __)? name:Identifier params:ParameterList _ body:FunctionBody {
-  symbols.registerFunction(ensureLowerCase(name, "Function names"), params, body);
+Function "function definition" = func:FunctionStart body:FunctionBody? {
+  if (func.name === null) {
+    error("Missing function name.");
+    return;
+  }
+  if (func.params === null) {
+    error("Function " + func.name + " missing parameters.");
+    return;
+  }
+  if (body === null) {
+    error("Function " + func.name + " missing or invalid function body.");
+    return;
+  }
+  symbols.registerFunction(ensureLowerCase(func.name, "Function names"), func.params, body);
 }
 
-Path "path statement" = ("path" __)? path:(path:PathExpression { pushPath(path); return path; })
-  isType:(__ "is" __ id:TypeExpression { return id; })? _
-  methods:("{" _ all:PathsAndMethods "}" { return all; } / ";" { return {}; } ) _ {
-    symbols.registerPath(currentPath(), isType, methods);
-    popPath(path);
+// For better error handling.
+FunctionStart = "function" __ name:Identifier? _ params:ParameterList? _ { return {name: name, params: params}; }
+  / name:Identifier _ params:ParameterList _ {return {name: name, params: params}; }
+
+Path "path statement" = path:PathStart isType:(__ "is" __ id:TypeExpression { return id; })? _
+  methods:("{" _ all:PathsAndMethods "}" { return all; } / ";" { return {}; } )? _ {
+    if (path === null) {
+      return;
+    }
+    if (methods === null) {
+      error("Missing body of path statement.");
+      return;
+    }
+    symbols.registerPath(currentPath, isType, methods);
+    currentPath.pop(path);
+  }
+
+// Break out for better error handling.
+PathStart = "path" __ path:PathTemplate?
+  {
+    if (path === null) {
+      error("Missing Path Template in path statement.");
+      return path;
+    }
+    currentPath.push(path);
+    return path;
+  }
+  / path:PathTemplate
+  {
+    currentPath.push(path); return path;
   }
 
 // Parse trailing slash and empty parts but emit error message.
-PathExpression "path" =  parts:("/" part:Identifier? { return part; })+ {
+PathTemplate "path template" =  parts:("/" part:PathKey? { return part; })+ {
   var hasError = false;
   if (parts.length === 1 && parts[0] === null) {
     parts = [];
@@ -140,18 +148,38 @@ PathExpression "path" =  parts:("/" part:Identifier? { return part; })+ {
     return part;
   });
   if (hasError) {
-    error((parts[parts.length - 1] === '' ? "Paths may not end in a slash (/) character"
-           : "Paths may not contain an empty part") + ": /" + parts.join('/'));
+    error((parts[parts.length - 1] === ''
+           ? "Paths may not end in a slash (/) character"
+           : "Paths may not contain an empty part") + ": /" + parts.map(function(part) { return part.label; }).join('/'));
   }
-  return parts;
+  return new ast.PathTemplate(parts);
 }
 
-PathsAndMethods = all:(Path / Method)* _ {
+PathKey = CaptureKey / LiteralPathKey
+
+CaptureKey = "{" _ id:Identifier _ ("=" _ "*" _ )? "}" {
+  return new ast.PathPart(id, id);
+}
+
+LiteralPathKey = chars: [^ /;]+ {
+  var result = chars.join('');
+  if (chars[0] === '$') {
+    warn("Use of " + result + " to capture a path segment is deprecated; " +
+         "use {" + result + "} or {" + result.slice(1) + "}, instead.");
+  }
+  return new ast.PathPart(result);
+}
+
+PathsAndMethods = all:(Path / Method / AnyBlock)* _ {
   var result = {};
   for (var i = 0; i < all.length; i++) {
     var method = all[i];
     // Skip embedded path statements.
     if (method === undefined) {
+      continue;
+    }
+    if (typeof method == 'string') {
+      error("Invalid path or method: '" + method + "'.");
       continue;
     }
     if (method.name in result) {
@@ -163,19 +191,27 @@ PathsAndMethods = all:(Path / Method)* _ {
 }
 
 Schema "type statement" =
-  "type" __ type:Identifier
+  "type" __ type:Identifier?
   params:("<" list:IdentifierList ">" { return ensureUpperCase(list, "Type names"); })?
   ext:(__ "extends" __ type:TypeExpression  _ { return type; })?
   body:(_ "{" _ all:PropertiesAndMethods "}" { return all; }
-        / _ ";" { return {properties: {}, methods: {}}; } ) {
+        / _ ";" { return {properties: {}, methods: {}}; } )? {
     if (params === null) {
       params = [];
+    }
+    if (type === null) {
+      error("Missing type name.");
+      return;
+    }
+    if (body === null) {
+      error("Missing or invalid type statement body.");
+      return;
     }
     symbols.registerSchema(ensureUpperCase(type, "Type names"),
                            ext, body.properties, body.methods, params);
 }
 
-PropertiesAndMethods = all:(Property / Method)* _ {
+PropertiesAndMethods = all:(Property / Method / AnyBlock)* _ {
   var result = {
      properties: {},
      methods: {}
@@ -183,6 +219,10 @@ PropertiesAndMethods = all:(Property / Method)* _ {
 
   function addPart(part) {
     // TODO: Make sure methods and properties don't shadow each other.
+    if (typeof part === 'string') {
+      error("Invalid property or method: '" + part + "'.");
+      return;
+    }
     if ('type' in part) {
       if (result.properties[part.name]) {
         error("Duplicate property name: " + part.name);
@@ -210,9 +250,12 @@ Property = name:(Identifier / String) _ ":" _ type:TypeExpression _ PropSep {
   };
 }
 
-PropSep = ("," / ";")? _
+PropSep = sep:("," / ";")? _ { return sep; }
 
-Method "method" = name:Identifier params:ParameterList _ body:FunctionBody {
+Method "method" = name:Identifier params:ParameterList _ body:FunctionBody sep:PropSep {
+  if (sep !== null) {
+    warn("Extra separator (" + sep + ") not needed.");
+  }
   return {
     name:  ensureLowerCase(name, "Method names"),
     params: params,
@@ -220,8 +263,11 @@ Method "method" = name:Identifier params:ParameterList _ body:FunctionBody {
   };
 }
 
-FunctionBody = "{" _ ("return" _)? exp:Expression _ ";"? _ "}" _ { return exp; }
-  / "=" _ exp:Expression _ ";" _ { return exp; }
+FunctionBody = "{" _ ("return" __)? exp:Expression _ ";"? _ "}" _ { return exp; }
+  / "=" _ exp:Expression ";"? _ {
+    warn("Use of fn(x) = exp; format is deprecated; use fn(x) { exp }, instead.")
+    return exp;
+  }
 
 ParameterList = "(" list:IdentifierList ")" _ { return ensureLowerCase(list, "Function arguments"); }
 
@@ -378,6 +424,7 @@ EqualityExpression
     }
 
 EqualityOperator = ("===" / "==") { return "=="; }
+                 / "=" { error("Equality operator should be written as ==, not =.");  return "=="; }
                  / ("!==" / "!=") { return "!="; }
 
 LogicalANDExpression
@@ -558,5 +605,6 @@ MultiLineComment
 SingleLineComment
   = "//" (!NewLine .)*;
 
+AnyBlock = chars:(![;,}] char_:. { return char_; })+ [;,}] _ { return chars.join(''); }
 
 NewLine = [\n\r]

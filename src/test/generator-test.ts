@@ -17,13 +17,12 @@
 /// <reference path="../typings/mocha.d.ts" />
 /// <reference path="../typings/chai.d.ts" />
 
-interface Window { bolt: any; }
-declare var window: Window;
-var bolt = (typeof(window) !== 'undefined' && window.bolt) || require('../bolt');
+import bolt = require('../bolt');
 var parse = bolt.parse;
 import generator = require('../rules-generator');
 import ast = require('../ast');
 import fileio = require('../file-io');
+import logger = require('../logger');
 import helper = require('./test-helper');
 
 import chai = require('chai');
@@ -36,13 +35,25 @@ var assert = chai.assert;
 suite("Rules Generator Tests", function() {
   suite("Basic Samples", function() {
     var tests = [
-      { data: "path / {read() { return true; } write() { return true; }}",
+      { data: "path / {read() { true } write() { true }}",
         expect: { rules: {".read": "true", ".write": "true"} }
       },
-      { data: "path / {read() { return true; }}",
+      { data: "path / { write() { true }}",
+        expect: { rules: {".write": "true"} }
+      },
+      { data: "path / { create() { true }}",
+        expect: { rules: {".write": "data.val() == null"} }
+      },
+      { data: "path / { update() { true }}",
+        expect: { rules: {".write": "data.val() != null && newData.val() != null"} }
+      },
+      { data: "path / { delete() { true }}",
+        expect: { rules: {".write": "data.val() != null && newData.val() == null"} }
+      },
+      { data: "path / {read() { true }}",
         expect: { rules: {".read": "true"} }
       },
-      { data: "path / { read() { return false; }}",
+      { data: "path / { read() { false }}",
         expect: { rules: {} }
       },
       { data: "path / {index() { return ['a', 'b']; }}",
@@ -68,6 +79,7 @@ suite("Rules Generator Tests", function() {
                  "mail",
                  "type-extension",
                  "children",
+                 "create-update-delete",
                  "functional",
                  "user-security",
                  "generics",
@@ -76,7 +88,7 @@ suite("Rules Generator Tests", function() {
                  "chat",
                  "serialized",
                  "map-scalar",
-                 "regexp"
+                 "regexp",
                 ];
 
     helper.dataDrivenTest(files, function(filename) {
@@ -136,7 +148,7 @@ suite("Rules Generator Tests", function() {
       var gen = new bolt.Generator(symbols);
       // Make sure local Schema initialized.
       var json = gen.generateRules();
-      assert.equal(json.rules.x['.write'], expect);
+      assert.equal(json['rules']['x']['.write'], expect);
     });
   });
 
@@ -175,7 +187,7 @@ suite("Rules Generator Tests", function() {
       var gen = new bolt.Generator(symbols);
       // Make sure local Schema initialized.
       var json = gen.generateRules();
-      assert.equal(json.rules.x['.write'], expect);
+      assert.equal(json['rules']['x']['.write'], expect);
     });
   });
 
@@ -193,7 +205,7 @@ suite("Rules Generator Tests", function() {
       var gen = new bolt.Generator(symbols);
       gen.ensureValidator(ast.typeType(data));
 
-      var terms = gen.validators[data]['.validate'];
+      var terms = <ast.Exp[]> gen.validators[data]['.validate'];
       var result = bolt.decodeExpression(ast.andArray(terms));
       assert.deepEqual(result, expect);
     });
@@ -286,7 +298,7 @@ suite("Rules Generator Tests", function() {
         expect: {'.validate': "newData.hasChildren()",
                  x: {'$key1': {'.validate': "newData.isNumber()"}},
                  '$other': {'.validate': "false"}} },
-      { data: "type SmallString extends String { validate() = this.length < 32; } " +
+      { data: "type SmallString extends String { validate() { this.length < 32 } } " +
               "type T {x: Map<SmallString, Number>}",
         expect: {'.validate': "newData.hasChildren()",
                  x: {'$key1': {'.validate': "$key1.length < 32 && newData.isNumber()"}},
@@ -301,12 +313,12 @@ suite("Rules Generator Tests", function() {
                  'second': {'.validate': "newData.isNumber()"},
                  '$other': {'.validate': "false"}} },
 
-      { data: "type X { a: Number, validate() = this.a == key(); } type T extends X[];",
+      { data: "type X { a: Number, validate() { this.a == key() } } type T extends X[];",
         expect: {'$key1': {'.validate': "newData.hasChildren(['a']) && newData.child('a').val() == $key1",
                            'a': {'.validate': "newData.isNumber()"},
                            '$other': {'.validate': "false"}}
                 } },
-      { data: "type X { a: Number, validate() = this.a == key(); } type T { x: X }",
+      { data: "type X { a: Number, validate() { this.a == key() } } type T { x: X }",
         expect: {'x': {'.validate': "newData.hasChildren(['a']) && newData.child('a').val() == 'x'",
                        'a': {'.validate': "newData.isNumber()"},
                        '$other': {'.validate': "false"}},
@@ -314,8 +326,8 @@ suite("Rules Generator Tests", function() {
                  '.validate': "newData.hasChildren(['x'])"
                 } },
 
-      { data: "type T extends String { validate() = root == 'new' && prior(root) == 'old';}" +
-              "path /t/x is Any { read() = root == 'old';}",
+      { data: "type T extends String { validate() { root == 'new' && prior(root) == 'old' } }" +
+              "path /t/x is Any { read() { root == 'old' } }",
         expect: {'.validate': "newData.isString() && newData.parent().val() == 'new' && root.val() == 'old'",
                  'x': {'.read': "root.val() == 'old'"}
                 } },
@@ -384,7 +396,7 @@ suite("Rules Generator Tests", function() {
         expect: /undefined.*function/i },
       { data: "path /x is NoSuchType {}",
         expect: /No type.*NoSuchType/ },
-      { data: "path /x { unsupported() { return true; } }",
+      { data: "path /x { unsupported() { true } }",
         warn: /unsupported method/i },
 
       { data: "path /x { validate() { return this.test(123); } }",
@@ -410,20 +422,20 @@ suite("Rules Generator Tests", function() {
         expect: /No type.*generic/ },
       { data: "path / is Map<Object, Number>;",
         expect: /must derive from String/ },
+      { data: "path / { write() { true } create() { true } }",
+        expect: /write-aliasing.*create/i },
+      { data: "path / { write() { true } update() { true } }",
+        expect: /write-aliasing.*update/i },
+      { data: "path / { write() { true } delete() { true } }",
+        expect: /write-aliasing.*delete/i },
     ];
 
     helper.dataDrivenTest(tests, function(data, expect, t) {
-      var symbols = parse(data);
-      var gen = new bolt.Generator(symbols);
-      var lastError;
-      gen.setLoggers({
-        error: function(s) {
-          lastError = s;
-        },
-        warn: function(s) {
-          lastError = s;
-        },
-      });
+      logger.reset();
+      logger.silent();
+      let symbols = parse(data);
+      let gen = new bolt.Generator(symbols);
+      let lastError;
 
       try {
         gen.generateRules();
@@ -431,7 +443,7 @@ suite("Rules Generator Tests", function() {
         if (!expect) {
           throw e;
         }
-        lastError = lastError || e.message;
+        lastError = logger.getLastMessage() || e.message;
         assert.match(lastError, expect);
         return;
       }
@@ -439,7 +451,7 @@ suite("Rules Generator Tests", function() {
         assert.fail(undefined, undefined, "No exception thrown.");
       }
       if (t.warn) {
-        assert.match(lastError, t.warn);
+        assert.match(logger.getLastMessage(), t.warn);
       }
     });
   });

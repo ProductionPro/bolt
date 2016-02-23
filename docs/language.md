@@ -33,7 +33,7 @@ type MyType [extends BaseType] {
   property2: Type,
   ...
 
-  validate() = <validation expression>;
+  validate() { <validation expression> }
   }
 }
 ```
@@ -50,14 +50,19 @@ Types can extend other types by using the `extends` clause. If not given,
 which extend an Object, can add additional properties to the Object, in addition to
 a `validate` expression.
 
+Property names in type statements should be valid Identifiers (see below).  If you need
+to use any other character in a property name, you can enclose them in quotes (note
+that Firebase allows any character in a path *except* for `.`, `$`, `#`, `[`, `[`, `/`,
+or control characters).
+
 Built-in base types are also similar to JavaScript types:
 
-    String            - Stings
+    String            - Character strings
     Number            - Integer or floating point
-    Boolean           - Values true or false
+    Boolean           - Values `true` or `false`
     Object            - A structured object containing named properties.
     Any               - Every non-null value is of type Any.
-    Null              - Value null (same as absence of a value, or deleted)
+    Null              - Value `null` (same as absence of a value, or deleted)
     Map<Key, Value>   - A generic type - maps string valued keys to corresponding
                         values (similar to an Object type).
     Type[]            - An "array-like" type (actually same as Map<String, Type>
@@ -67,11 +72,11 @@ Any of the built-in scalar types can be _extended_ by adding a validation expres
 
 ```javascript
 type ShortString extends String {
-  validate() = this.length < 32;
+  validate() { this.length < 32 }
 }
 
 type Percentage extends Number {
-  validate() = this >=0 && this <= 100;
+  validate() { this >=0 && this <= 100 }
 }
 ```
 
@@ -103,7 +108,7 @@ type Model {
 }
 
 type ProductID extends String {
-  validate() = this.length <= 20;
+  validate() { this.length <= 20 }
 }
 ```
 
@@ -145,11 +150,11 @@ A path statement provides access and validation rules for data stored at a given
 
 ```javascript
 path /path/to/data [is Type] {
-  read() = <true-iff-reading-this-path-is-allowed>;
+  read() { <true-iff-reading-this-path-is-allowed> }
 
-  write() = <true-iff-writing-this-path-is-allowed>;
+  write() { <true-iff-writing-this-path-is-allowed> }
 
-  validate() = <additional-validation-rules>;
+  validate() { <additional-validation-rules> }
 }
 ```
 
@@ -168,27 +173,44 @@ database to determine these permissions.
 The `validate` expression can be used to check for additional constraints
 (beyond the Type `validate` rules) required to store a value at the given path,
 and especially perform constraints that are path-dependent.  Path
-statements can include wildcard parts whose values can then be used within
+templates can include _captured_ parts whose values can then be used within
 an expression as a variable parameter:
 
 ```javascript
-path /users/$uid is User {
+path /users/{uid} is User {
   // Anyone can read a User's information.
-  read() = true;
+  read() { true }
 
   // Only an authenticated user can write their information.
-  write() = auth != null && auth.uid == $uid;
+  write() { auth != null && auth.uid == uid }
 }
 ```
 
 If a path needs no expressions, the following abbreviated form (without a body)
 can be used:
 
-    path /users/$uid is User;
+    path /users/{uid} is User;
 
 and the `path` keyword can also be omitted.
 
-    /users/$uid is User;
+    /users/{uid} is User;
+
+## Write Aliases
+
+A common pattern is to have distinct rules for allowing writes to a location that represent,
+new object creation (create), modification of existing data (update), or deleting data (delete).
+Bolt allows you to use these methods in lieu of the write() method in any path or type
+statement.
+
+Alias            | Write Equivalent
+-----------------| ----------------
+create() { exp } | write() { prior(this) == null && exp }
+update() { exp } | write() { prior(this) != null && this != null && exp }
+delete() { exp } | write() { prior(this) != null && this == null && exp }
+
+If you use any of create(), update(), or delete(), you may not use a write() method in your
+path or type statement.
+
 
 ## String methods
 
@@ -237,7 +259,7 @@ and one of its properties:
 path /products is Product[];
 
 type Product {
-  validate() = this.id == key();
+  validate() { this.id == key() }
 
   id: String,
   name: String
@@ -258,7 +280,7 @@ function isUser(uid) {
 
 function isUser(uid) { auth != null && auth.uid == uid }
 
-isUser(uid) = auth != null && auth.uid == uid;
+isUser(uid) { auth != null && auth.uid == uid }
 ```
 
 Similarly, methods in path and type statements can use the abbreviated functional form (all
@@ -266,9 +288,14 @@ these are equivalent):
 
 ```javascript
 write() { return this.user == auth.uid; }
+write() { this.user == auth.uid; }
 write() { this.user == auth.uid }
-write() = this.user == auth.uid;
 ```
+
+# Identifiers
+
+Identifiers in expressions, property names, and path captured parts, must begin with one of
+alphabetic, _ or $ characters and can contain any alphabetic, numeric, _ or $.
 
 # Expressions
 
@@ -276,6 +303,9 @@ Rule expressions are a subset of JavaScript expressions, and include:
 
   - Unary operators: - (minus), ! (boolean negation)
   - Binary operators: +, -, *, /, %
+  - String constants can be expressed using single or double quotes and can
+    include Hex escape characters (\xXX), Unicode escape characters (\uXXXX)
+    or special escape characters \b, \f, \n, \r, or \t.
 
 # Global variables
 
@@ -295,17 +325,17 @@ not identical in Bolt.  This section demonstrates how equivalent behavior is ach
 
 API | Bolt Equivalent
 ----| ---------------
-".read" : "exp" | read() { return exp; }
-".write" : "exp" | write() { return exp; }
-".validate": "exp" | validate() { return exp; }
-".indexOn": [ "prop", ...] | index() { return [ "prop", ... ] }
+".read" : "exp" | read() { exp }
+".write" : "exp" | write() { exp }
+".validate": "exp" | validate() { exp }
+".indexOn": [ "prop", ...] | index() { [ "prop", ... ] }
 
 ## Variables
 
 API | Bolt Equivalent
 ----| ---------------
 auth | auth
-$location | $location (in path statement)
+$location | {location} (in path statement)
 now | now
 data | prior(this)
 newData | this (in validate() and write() rules)

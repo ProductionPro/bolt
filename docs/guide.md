@@ -21,19 +21,20 @@ JSON.
 
 ## Default Firebase Permissions
 
-By default, Firebase has a permissive security model; everyone can read and write all data.
-This makes it easy to test your code, but is unsafe for production apps since anyone can read
-and overwrite all your data. In Bolt, these default permissions can be written as:
+When you first create a Firebase app, you get a default rule set that allows everyone to read
+and write all data. This makes it easy to test your code, but is unsafe for production apps
+since anyone can read and overwrite any data saved by your app. In Bolt, these default
+permissions can be written as:
 
 [all_access.bolt](../samples/all_access.bolt)
 ```javascript
 path / {
-  read() = true;
-  write() = true;
+  read() { true }
+  write() { true }
 }
 ```
 
-The `read() = true` and `write() = true` methods allow everyone to read and write this location
+The `read() { true }` and `write() { true }` methods allow everyone to read and write this location
 (and all children under this location). You can also use more complex expressions instead of
 `true`.  When the expression evaluates to `true` the read or write operation is allowed.
 
@@ -49,6 +50,23 @@ Use the Bolt compiler to convert this to Firebase JSON-formatted rules:
   }
 }
 ```
+
+In general, Firebase `read` and `write` expresses grant acceess to data based on the authentication
+state of the user, while `validate` expressions enforce data types and the schema of data
+you allow to be saved in the database.
+
+It is important to keep in mind that, unless specified by a read or write expression, no permission
+will be granted to your database; a read/write rule will grant access to the data stored
+at a path location (and **ALL** its children).  To determine if a location is readable (writable) - you can
+look to see if **ANY** of the read (write) expressions at that location or higher evaluate to `true` (i.e.
+the effect is a boolean **OR** of all the parent read (write) expressions).
+
+Validatation rules are treated differently - all applicable validation rules at the written
+location (and higher) must evaluate to `true` in order for the write to be permitted (i.e., the
+effect is a boolean **AND** of all the parent validate expressions).
+
+For a more complete description of the way rules are evaluated, see the [Firebase Security and
+Rules Quickstart](https://www.firebase.com/docs/security/quickstart.html).
 
 ## How to Use Bolt in Your Application
 
@@ -79,16 +97,16 @@ _posts.bolt_
 ```javascript
 // Allow anyone to read the list of Posts.
 path /posts {
-  read() = true;
+  read() { true }
 }
 
 // All individual Posts are writable by anyone.
-path /posts/$id is Post {
-  write() = true;
+path /posts/{id} is Post {
+  write() { true }
 }
 
 type Post {
-  validate() = this.message.length <= 140;
+  validate() { this.message.length <= 140 }
 
   message: String,
   from: String
@@ -97,16 +115,16 @@ type Post {
 
 This database allows for a collection of _Posts_ to be stored at the `/posts` path. Each one
 must have a unique ID key. Note that a path expression (after the `path` keyword) can contain a
-_wildcard_ component. This matches any string, and the value of the match is available to be
+_captured_ component. This matches any string, and the value of the match is available to be
 used in expressions, if desired.
 
-For example, writing data at `/posts/123` will match the `path /posts/$id` statement with `$id`
-being equal to (the string) '123'.
+For example, writing data at `/posts/123` will match the `path /posts/{id}` statement with the
+captured variable `id` being equal to (the string) '123'.
 
 The Post type allows for exactly two string properties in each post (message and
 from). It also ensures that no message is longer than 140 characters.
 
-Bolt type statements can contain a `validate()` method (defined as `validate() = <expression>`,
+Bolt type statements can contain a `validate()` method (defined as `validate() { <expression> }`,
 where the expression evaluates to `true` if the data is valid (can be saved to the
 database). When the expression evaluates to `false`, the attempt to write the data will return
 an error to the Firebase client and the database will be unmodified.
@@ -188,8 +206,8 @@ suppose we have several places where we use a _NameString_ - and we require that
 string of no more than 32 characters:
 
 ```javascript
-path /users/$id is User;
-path /rooms/$id is Room;
+path /users/{id} is User;
+path /rooms/{id} is Room;
 
 type User {
   name: NameString,
@@ -202,7 +220,7 @@ type Room {
 }
 
 type NameString extends String {
-  validate() = this.length > 0 && this.length <= 32;
+  validate() { this.length > 0 && this.length <= 32 }
 }
 ```
 
@@ -254,9 +272,9 @@ Bolt also allows you to organize common expressions as top-level functions in a 
 definitions look just like _type_ and _path_ methods, except they can also accept parameters.
 
 ```javascript
-path /users/$userid is User {
-  read() = true;
-  write() = isCurrentUser($userid);
+path /users/{userid} is User {
+  read() { true }
+  write() { isCurrentUser(userid) }
 }
 
 type User {
@@ -266,7 +284,7 @@ type User {
 
 // Define isCurrentUser() function to test if the given user id
 // matches the currently signed-in user.
-isCurrentUser(uid) = auth != null && auth.uid == uid;
+isCurrentUser(uid) { auth != null && auth.uid == uid }
 ```
 
 ```JSON
@@ -304,11 +322,11 @@ a time is written, it exactly matches the (trusted) server time (independent of 
 the client device).
 
 ```javascript
-path /posts/$id is Post;
+path /posts/{id} is Post;
 
 type Post {
   // Make sure that the only value allowed to be written is now.
-  validate() = this.modified == now;
+  validate() { this.modified == now }
 
   message: String,
   modified: Number
@@ -321,9 +339,9 @@ Each time the Post is written, modified must be set to the current time (using
 A handy way to express this is to use a user-defined type for the CurrentTimestamp:
 
 ```javascript
-path /posts/$id is Post {
-  read() = true;
-  write() = true;
+path /posts/{id} is Post {
+  read() { true }
+  write() { true }
 }
 
 type Post {
@@ -332,7 +350,7 @@ type Post {
 }
 
 type CurrentTimestamp extends Number {
-  validate() = this == now;
+  validate() { this == now }
 }
 ```
 
@@ -340,9 +358,9 @@ Similarly, if you want to have a `created` property, it should match the current
 when first written, and never change thereafter:
 
 ```javascript
-path /posts/$id is Post {
-  read() = true;
-  write() = true;
+path /posts/{id} is Post {
+  read() { true }
+  write() { true }
 }
 
 type Post {
@@ -352,16 +370,16 @@ type Post {
 }
 
 type CurrentTimestamp extends Number {
-  validate() = this == now;
+  validate() { this == now }
 }
 
 type InitialTimestamp extends Number {
-  validate() = initial(this, now);
+  validate() { initial(this, now) }
 }
 
 // Returns true if the value is intialized to init, or if it retains it's prior
 // value, otherwise.
-initial(value, init) = value == (prior(value) == null ? init : prior(value));
+initial(value, init) { value == (prior(value) == null ? init : prior(value)) }
 ```
 
 Note the special function `prior(ref)` - returns the previous value stored at a given database location
@@ -400,9 +418,9 @@ to define the Timestamp example above is:
 
 ```javascript
 // Note the use of Timestamped version of a Post type.
-path /posts/$id is Timestamped<Post> {
-  read() = true;
-  write() = true;
+path /posts/{id} is Timestamped<Post> {
+  read() { true }
+  write() { true }
 }
 
 type Post {
@@ -415,16 +433,16 @@ type Timestamped<T> extends T {
 }
 
 type CurrentTimestamp extends Number {
-  validate() = this == now;
+  validate() { this == now }
 }
 
 type InitialTimestamp extends Number {
-  validate() = initial(this, now);
+  validate() { initial(this, now) }
 }
 
 // Returns true if the value is intialized to init, or retains it's prior
 // value, otherwise.
-initial(value, init) = value == (prior(value) == null ? init : prior(value));
+initial(value, init) { value == (prior(value) == null ? init : prior(value)) }
 ```
 
 ```JSON
@@ -463,34 +481,34 @@ Rules](https://www.firebase.com/docs/security/guide/user-security.html#section-r
 // Room Names
 //
 path /rooms_names is String[] {
-  read() = isSignedIn();
+  read() { isSignedIn() }
 }
 
-getRoomName(id) = prior(root.room_names[id]);
+getRoomName(id) { prior(root.room_names[id]) }
 
 //
 // Room Members
 //
-path /members/$room_id {
-  read() = isRoomMember($room_id);
+path /members/{room_id} {
+  read() { isRoomMember(room_id) }
 }
 
-path /members/$room_id/$user_id is NameString {
-  write() = isCurrentUser($user_id);
+path /members/{room_id}/{user_id} is NameString {
+  write() { isCurrentUser(user_id) }
 }
 
-isRoomMember(room_id) = isSignedIn() && prior(root.members[room_id][auth.uid]) != null;
+isRoomMember(room_id) { isSignedIn() && prior(root.members[room_id][auth.uid]) != null }
 
 //
 // Messages
 //
-path /messages/$room_id {
-  read() = isRoomMember($room_id);
-  validate() = getRoomName($room_id) != null;
+path /messages/{room_id} {
+  read() { isRoomMember(room_id) }
+  validate() { getRoomName(room_id) != null }
 }
 
-path /messages/$room_id/$message_id is Message {
-  write() = createOnly(this) && isRoomMember($room_id);
+path /messages/{room_id}/{message_id} is Message {
+  write() { createOnly(this) && isRoomMember(room_id) }
 }
 
 type Message {
@@ -500,26 +518,26 @@ type Message {
 }
 
 type MessageString extends String {
-  validate() = this.length > 0 && this.length < 50;
+  validate() { this.length > 0 && this.length < 50 }
 }
 
 //
 // Helper Types
 //
 type CurrentTimestamp extends Number {
-  validate() = this == now;
+  validate() { this == now }
 }
 
 type NameString {
-  validate() = this.length > 0 && this.length < 20;
+  validate() { this.length > 0 && this.length < 20 }
 }
 
 //
 // Helper Functions
 //
-isCurrentUser(uid) = isSignedIn() && auth.uid == uid;
-isSignedIn() = auth != null;
-createOnly(value) = prior(value) == null && value != null;
+isCurrentUser(uid) { isSignedIn() && auth.uid == uid }
+isSignedIn() { auth != null }
+createOnly(value) { prior(value) == null && value != null }
 ```
 
 ```JSON

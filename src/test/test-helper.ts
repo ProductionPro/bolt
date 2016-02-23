@@ -17,6 +17,7 @@
 
 import util = require('../util');
 import ast = require('../ast');
+import logger = require('../logger');
 
 /*
  * Run data drive test with tests is one of these formats:
@@ -62,6 +63,13 @@ export function dataDrivenTest(tests, testIt, formatter?) {
       }
     }
 
+    setup(() => {
+      logger.reset();
+      logger.silent();
+    });
+    teardown(() => {
+      logger.reset();
+    });
     test(label, testIt.bind(undefined, data, expect, tests[i]));
   }
 }

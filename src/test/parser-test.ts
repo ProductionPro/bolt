@@ -20,17 +20,14 @@ import chai = require('chai');
 var assert = chai.assert;
 import fileIO = require('../file-io');
 var readFile = fileIO.readFile;
+import logger = require('../logger');
+var parser = require('../rules-parser');
+var parse = parser.parse;
+import ast = require('../ast');
+import bolt = require('../bolt');
 import helper = require('./test-helper');
 
-interface Window { bolt: any; }
-declare var window: Window;
-var bolt = (typeof(window) !== 'undefined' && window.bolt) || require('../bolt');
-var ast = bolt.ast;
-var parse = bolt.parse;
-var BOLT_EXTENSION = bolt.FILE_EXTENSION;
-
 // TODO: Test duplicated function, and schema definitions.
-// TODO: Test other parser errors - appropriate messages (exceptions).
 
 suite("Rules Parser Tests", function() {
   test("Empty input", function() {
@@ -189,40 +186,52 @@ suite("Rules Parser Tests", function() {
   suite("Paths", function() {
     var tests = [
       { data: "path / {}",
-        expect: {"/": { parts: [], isType: ast.typeType('Any'), methods: {} }} },
+        expect: [{ template: new ast.PathTemplate(),
+                   isType: ast.typeType('Any'),
+                   methods: {} }] },
       { data: "path /x {}",
-        expect: {"/x": { parts: ['x'], isType: ast.typeType('Any'), methods: {} }} },
-      { data: "path /p/$q { write() { return true;  }}",
-        expect: {"/p/$q": { isType: ast.typeType('Any'),
-                            parts: ['p', '$q'],
-                            methods: {write: {params: [], body: ast.boolean(true)}}}} },
-      { data: "path /x/y { read() = true; }",
-        expect: {"/x/y": { isType: ast.typeType('Any'),
-                           parts: ['x', 'y'],
-                           methods: {read: {params: [], body: ast.boolean(true)}}}} },
-      { data: "path /x { read() = true; /y { write() = true; }}",
-        expect: {"/x": { isType: ast.typeType('Any'),
-                         parts: ['x'],
-                         methods: {read: {params: [], body: ast.boolean(true)}}},
-                 "/x/y": { isType: ast.typeType('Any'),
-                           parts: ['x', 'y'],
-                           methods: {write: {params: [], body: ast.boolean(true)}}}} },
+        expect: [{ template: new ast.PathTemplate(['x']),
+                   isType: ast.typeType('Any'),
+                   methods: {} }] },
+      { data: "path /p/{$q} { write() { return true;  }}",
+        expect: [{ isType: ast.typeType('Any'),
+                   template: new ast.PathTemplate(['p', '$q']),
+                   methods: {write: {params: [], body: ast.boolean(true)}}}] },
+      { data: "path /p/{q} { write() { return true;  }}",
+        expect: [{ isType: ast.typeType('Any'),
+                   template: new ast.PathTemplate(['p', new ast.PathPart('$q', 'q')]),
+                   methods: {write: {params: [], body: ast.boolean(true)}}}] },
+      { data: "path /x/y { read() { true } }",
+        expect: [{ isType: ast.typeType('Any'),
+                   template: new ast.PathTemplate(['x', 'y']),
+                   methods: {read: {params: [], body: ast.boolean(true)}}}] },
+      { data: "path /x { read() { true } /y { write() { true } }}",
+        expect: [{ isType: ast.typeType('Any'),
+                   template: new ast.PathTemplate(['x']),
+                   methods: {read: {params: [], body: ast.boolean(true)}}},
+                 { isType: ast.typeType('Any'),
+                   template: new ast.PathTemplate(['x', 'y']),
+                   methods: {write: {params: [], body: ast.boolean(true)}}}] },
 
-      { data: "path /x { read() = true; /y { write() = true; path /$id { validate() = false; }}}",
-        expect: {"/x": { isType: ast.typeType('Any'),
-                         parts: ['x'],
-                         methods: {read: {params: [], body: ast.boolean(true)}}},
-                 "/x/y": { isType: ast.typeType('Any'),
-                           parts: ['x', 'y'],
-                           methods: {write: {params: [], body: ast.boolean(true)}}},
-                 "/x/y/$id": { isType: ast.typeType('Any'),
-                             parts: ['x', 'y', '$id'],
-                             methods: {validate: {params: [], body: ast.boolean(false)}}},
-                } },
+      { data: "path /x { read() { true } /y { write() { true } path /{$id} { validate() { false } }}}",
+        expect: [{ isType: ast.typeType('Any'),
+                   template: new ast.PathTemplate(['x']),
+                   methods: {read: {params: [], body: ast.boolean(true)}}},
+                 { isType: ast.typeType('Any'),
+                   template: new ast.PathTemplate(['x', 'y']),
+                   methods: {write: {params: [], body: ast.boolean(true)}}},
+                 { isType: ast.typeType('Any'),
+                   template: new ast.PathTemplate(['x', 'y', '$id']),
+                   methods: {validate: {params: [], body: ast.boolean(false)}}},
+                ] },
+      { data: "path /hyphen-key {}",
+        expect: [ { template: new ast.PathTemplate(['hyphen-key']),
+                    isType: ast.typeType('Any'),
+                    methods: {} }] },
     ];
 
     helper.dataDrivenTest(tests, function(data, expect) {
-      assert.deepEqual(parse(data).paths, expect);
+      assert.deepEqual(sortPaths(parse(data).paths), sortPaths(expect));
     });
   });
 
@@ -352,7 +361,6 @@ suite("Rules Parser Tests", function() {
       "function f(x) { return x + 1 }",
       "function f(x) { x + 1; }",
       "function f(x) { x + 1 }",
-      "f(x) = x + 1;",
     ];
 
     helper.dataDrivenTest(tests, function(data, expect) {
@@ -368,7 +376,6 @@ suite("Rules Parser Tests", function() {
       "validate() { return this  }",
       "validate() { this; }",
       "validate() { this }",
-      "validate() = this;",
     ];
 
     helper.dataDrivenTest(tests, function(data, expect) {
@@ -380,23 +387,25 @@ suite("Rules Parser Tests", function() {
 
   suite("Path variations", function() {
     var tests = [
-      "path /p/c {}",
-      "/p/c {}",
-      "/p/c;",
-      "path /p/c is String {}",
-      "path /p/c is String;",
-      "/p/c is String {}",
-      "/p/c is String;",
-      "/p/c { validate() { return true; } }",
-      "/p/c { validate() { return true } }",
-      "/p/c { validate() { true } }",
-      "/p/c { validate() = true; }",
+      "path /p/{c} {}",
+      "/p/{c} {}",
+      "/p/{c};",
+      "path /p/{c} is String {}",
+      "path /p/{c} is String;",
+      "/p/{c} is String {}",
+      "/p/{c} is String;",
+      "/p/{c=*} is String;",
+      "/p/{c = *} is String;",
+      "/p/{c} { validate() { return true; } }",
+      "/p/{c} { validate() { return true } }",
+      "/p/{c} { validate() { true } }",
+      "/p/{c} { validate() { true; } }",
     ];
 
     helper.dataDrivenTest(tests, function(data, expect) {
       var result = parse(data);
-      assert.deepEqual(result.paths['/p/c'].parts,
-                       ['p', 'c']);
+      assert.deepEqual(result.paths[0].template,
+                       new ast.PathTemplate(['p', new ast.PathPart('$c', 'c')]));
     });
   });
 
@@ -420,10 +429,10 @@ suite("Rules Parser Tests", function() {
   });
 
   suite("Sample files", function() {
-    var files = ["all_access", "userdoc", "mail", "children"];
+    var files = ["all_access", "userdoc", "mail", "children", "create-update-delete"];
 
     helper.dataDrivenTest(files, function(data) {
-      var filename = 'samples/' + data + '.' + BOLT_EXTENSION;
+      var filename = 'samples/' + data + '.' + bolt.FILE_EXTENSION;
       return readFile(filename)
         .then(function(response) {
           var result = parse(response.content);
@@ -446,6 +455,24 @@ suite("Rules Parser Tests", function() {
         expect: /./ },
       { data: "path /x { validate() { return this.test(/a/g); } }",
         expect: /unsupported regexp modifier/i },
+      { data: "path {}",
+        expect: /missing path template/i },
+      { data: "path / }",
+        expect: /missing body of path/i },
+      { data: "function foo { 7 }",
+        expect: /missing parameters/i },
+      { data: "foo { 7 }",
+        expect: /expected.*function/i },
+      { data: "foo(x)",
+        expect: /missing.*body/i },
+      { data: "path /x { foo(x); }",
+        expect: /invalid path or method/i },
+      { data: "foo(x) { x = 'a' }",
+        expect: /equality/i },
+      { data: "type X { bad-prop: String; }",
+        expect: /invalid property or method/i },
+      { data: "type { foo: String;}",
+        expect: /missing type name/i },
     ];
 
     helper.dataDrivenTest(tests, function(data, expect) {
@@ -458,4 +485,50 @@ suite("Rules Parser Tests", function() {
       assert.fail(undefined, undefined, "No exception thrown.");
     });
   });
+
+  suite("Syntax warnings.", function() {
+    var tests = [
+      { data: "path /x { read() { true }; }",
+        expect: /extra separator/i },
+    ];
+
+    helper.dataDrivenTest(tests, function(data, expect) {
+      parse(data);
+      assert.match(logger.getLastMessage(), expect);
+    });
+  });
+
+  suite("Deprecation warnings.", function() {
+    var tests = [
+      { data: "path /x/$y is String;",
+        expect: /path segment is deprecated/ },
+      { data: "f(x) = x + 1;",
+        expect: /fn\(x\) = exp; format is deprecated/ },
+      { data: "f(x) = x + 1",
+        expect: /fn\(x\) = exp; format is deprecated/ },
+    ];
+
+    helper.dataDrivenTest(tests, function(data, expect) {
+      parse(data);
+      assert.match(logger.getLastMessage(), expect);
+    });
+  });
 });
+
+function sortPaths(paths: ast.Path[]): ast.Path[] {
+  function cmpStr(a, b) {
+    if (a < b) {
+      return -1;
+    }
+    if (a > b) {
+      return 1;
+    }
+    return 0;
+  }
+
+  paths.sort((a, b) => {
+    return cmpStr(a.template.getLabels().join('~'), b.template.getLabels().join('~'));
+  });
+
+  return paths;
+}
